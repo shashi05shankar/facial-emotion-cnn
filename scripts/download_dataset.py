@@ -1,8 +1,13 @@
-"""Download FER2013 (Kaggle: msambare/fer2013) into data/raw/.
+"""Download an FER2013 image-folder dataset into data/raw/{train,test}.
 
 Requires Kaggle API credentials configured (~/.kaggle/kaggle.json or
 KAGGLE_USERNAME/KAGGLE_KEY env vars). See
 https://github.com/Kaggle/kaggle-api#api-credentials
+
+Default source: astraszab/facial-expression-dataset-image-folders-fer2013
+(35,887 files, matches the original FER2013 train/PublicTest/PrivateTest
+split count). Auto-detects the actual train/test folder paths inside the
+downloaded cache so it's robust to whatever nesting the dataset uses.
 """
 from __future__ import annotations
 
@@ -11,23 +16,63 @@ from pathlib import Path
 
 import kagglehub
 
+from facial_emotion.constants import EMOTION_LABELS
+
+DATASET_SLUG = "astraszab/facial-expression-dataset-image-folders-fer2013"
 DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
+EMOTION_SET = {e.lower() for e in EMOTION_LABELS}
+
+
+def find_split_folders(root: Path) -> list[tuple[Path, int]]:
+    hits = []
+    for p in root.rglob("*"):
+        if not p.is_dir():
+            continue
+        child_names = {c.name.lower() for c in p.iterdir() if c.is_dir()}
+        if EMOTION_SET.issubset(child_names):
+            n_images = sum(1 for c in p.rglob("*") if c.is_file())
+            hits.append((p, n_images))
+    return sorted(hits, key=lambda h: -h[1])
+
+
+def pick(hits: list[tuple[Path, int]], keyword_groups: list[list[str]], exclude: Path | None = None) -> Path | None:
+    for keywords in keyword_groups:
+        for p, _ in hits:
+            if exclude is not None and p == exclude:
+                continue
+            if any(k in p.name.lower() for k in keywords):
+                return p
+    return None
 
 
 def main() -> None:
-    print("Downloading msambare/fer2013 via kagglehub ...")
-    cache_path = Path(kagglehub.dataset_download("msambare/fer2013"))
+    print(f"Downloading {DATASET_SLUG} via kagglehub ...")
+    cache_path = Path(kagglehub.dataset_download(DATASET_SLUG))
     print(f"Downloaded to cache: {cache_path}")
 
+    hits = find_split_folders(cache_path)
+    if not hits:
+        raise SystemExit(
+            f"Could not find a folder with subfolders {sorted(EMOTION_SET)} under {cache_path}. "
+            "Inspect the download manually and update this script's detection logic."
+        )
+
+    train_src = pick(hits, [["train", "training"]]) or hits[0][0]
+    test_src = pick(
+        hits, [["privatetest"], ["publictest"], ["test", "testing", "val", "validation"]], exclude=train_src
+    )
+    if test_src is None:
+        remaining = [h for h in hits if h[0] != train_src]
+        test_src = remaining[0][0] if remaining else train_src
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    for split in ("train", "test"):
-        src = cache_path / split
-        dst = DATA_DIR / split
-        if src.exists() and not dst.exists():
-            shutil.copytree(src, dst)
-            print(f"Copied {src} -> {dst}")
-        elif not src.exists():
-            print(f"WARNING: expected folder {src} not found in dataset download")
+    for split_name, src in (("train", train_src), ("test", test_src)):
+        dst = DATA_DIR / split_name
+        if dst.exists():
+            print(f"{dst} already exists, skipping copy")
+            continue
+        shutil.copytree(src, dst)
+        print(f"Copied {src} -> {dst}")
 
     print(f"Done. Dataset ready at {DATA_DIR}")
 

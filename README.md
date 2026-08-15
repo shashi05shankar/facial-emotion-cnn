@@ -9,9 +9,9 @@ webcam demo.
 
 ## Dataset
 
-[FER2013](https://www.kaggle.com/datasets/msambare/fer2013) — 35,887
+[FER2013, image-folder layout](https://www.kaggle.com/datasets/astraszab/facial-expression-dataset-image-folders-fer2013) — 35,887
 grayscale 48x48 face crops, 7 classes: angry, disgust, fear, happy, sad,
-surprise, neutral. Uses the dataset's own train/val/test split.
+surprise, neutral. Uses the dataset's own train/test split.
 
 ## Quick Start
 

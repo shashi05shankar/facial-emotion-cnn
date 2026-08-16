@@ -1,10 +1,17 @@
 """Build tf.data pipelines from the FER2013 train/test folder layout
-(Kaggle `msambare/fer2013`: train/<emotion>/*.jpg, test/<emotion>/*.jpg).
+(class-named subfolders under `train/` and `test/`).
+
+Preprocessing (CLAHE/normalize) is applied with plain NumPy/OpenCV before
+building the `tf.data.Dataset`, rather than via `tf.py_function` inside
+`.map()` — FER2013 is small enough to fully materialize in memory, and this
+avoids a Keras 3 + `tf.py_function` incompatibility inside `.map()`
+(`OptionalFromValue ... length 0`) seen in `model.fit`.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
+import cv2
 import numpy as np
 import tensorflow as tf
 
@@ -12,24 +19,28 @@ from facial_emotion.constants import EMOTION_LABELS, IMG_SIZE
 from facial_emotion.data.preprocessing import apply_clahe, normalize
 
 AUTOTUNE = tf.data.AUTOTUNE
+IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 
 
-def _clahe_normalize_batch(images: np.ndarray) -> np.ndarray:
-    processed = np.empty_like(images, dtype=np.float32)
-    for i in range(images.shape[0]):
-        gray = images[i, ..., 0].astype(np.uint8)
-        gray = apply_clahe(gray)
-        processed[i, ..., 0] = normalize(gray)
-    return processed
-
-
-def _preprocess_batch(images: tf.Tensor, labels: tf.Tensor, img_size: int, use_clahe: bool):
-    if use_clahe:
-        images = tf.py_function(_clahe_normalize_batch, [images], tf.float32)
-    else:
-        images = tf.cast(images, tf.float32) / 255.0
-    images.set_shape([None, img_size, img_size, 1])
-    return images, labels
+def load_split_as_arrays(directory: Path, class_names: list[str], img_size: int, use_clahe: bool):
+    images, labels = [], []
+    for idx, cls in enumerate(class_names):
+        cls_dir = directory / cls
+        for img_path in sorted(cls_dir.iterdir()):
+            if img_path.suffix.lower() not in IMG_EXTS:
+                continue
+            img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                continue
+            if img.shape != (img_size, img_size):
+                img = cv2.resize(img, (img_size, img_size), interpolation=cv2.INTER_AREA)
+            if use_clahe:
+                img = apply_clahe(img)
+            images.append(normalize(img))
+            labels.append(idx)
+    x = np.asarray(images, dtype=np.float32).reshape(-1, img_size, img_size, 1)
+    y = np.asarray(labels, dtype=np.int64)
+    return x, y
 
 
 def build_datasets(
@@ -42,39 +53,37 @@ def build_datasets(
 ):
     """Return (train_ds, val_ds, test_ds, class_names).
 
-    train/val come from `data_dir/train` via a stratified-by-shuffle split;
-    test comes from the dataset's own held-out `data_dir/test` folder.
+    train/val come from `data_dir/train` via a shuffled split; test comes
+    from the dataset's own held-out `data_dir/test` folder.
     """
     data_dir = Path(data_dir)
-    common = dict(
-        image_size=(img_size, img_size),
-        color_mode="grayscale",
-        batch_size=batch_size,
-        label_mode="int",
-    )
+    train_dir = data_dir / "train"
+    test_dir = data_dir / "test"
 
-    train_ds = tf.keras.utils.image_dataset_from_directory(
-        data_dir / "train", validation_split=val_split, subset="training", seed=seed, **common
-    )
-    val_ds = tf.keras.utils.image_dataset_from_directory(
-        data_dir / "train", validation_split=val_split, subset="validation", seed=seed, **common
-    )
-    test_ds = tf.keras.utils.image_dataset_from_directory(
-        data_dir / "test", shuffle=False, **common
-    )
-
-    class_names = train_ds.class_names
+    class_names = sorted(c.name for c in train_dir.iterdir() if c.is_dir())
     if class_names != EMOTION_LABELS:
         raise ValueError(
             f"Dataset class folders {class_names} don't match expected "
             f"EMOTION_LABELS {EMOTION_LABELS} — check the download layout."
         )
 
-    def prep(ds, shuffle_buffer: int | None = None):
-        ds = ds.map(
-            lambda x, y: _preprocess_batch(x, y, img_size, use_clahe),
-            num_parallel_calls=AUTOTUNE,
-        )
-        return ds.prefetch(AUTOTUNE)
+    x_all, y_all = load_split_as_arrays(train_dir, class_names, img_size, use_clahe)
+    x_test, y_test = load_split_as_arrays(test_dir, class_names, img_size, use_clahe)
 
-    return prep(train_ds), prep(val_ds), prep(test_ds), class_names
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(len(x_all))
+    x_all, y_all = x_all[perm], y_all[perm]
+    n_val = int(len(x_all) * val_split)
+    x_val, y_val = x_all[:n_val], y_all[:n_val]
+    x_train, y_train = x_all[n_val:], y_all[n_val:]
+
+    train_ds = (
+        tf.data.Dataset.from_tensor_slices((x_train, y_train))
+        .shuffle(min(len(x_train), 4096), seed=seed)
+        .batch(batch_size)
+        .prefetch(AUTOTUNE)
+    )
+    val_ds = tf.data.Dataset.from_tensor_slices((x_val, y_val)).batch(batch_size).prefetch(AUTOTUNE)
+    test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)).batch(batch_size).prefetch(AUTOTUNE)
+
+    return train_ds, val_ds, test_ds, class_names

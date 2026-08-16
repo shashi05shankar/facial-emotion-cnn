@@ -5,7 +5,7 @@ description = "Facial emotion detection with a CNN, trained on FER2013, deployed
 requires-python = ">=3.11"
 dependencies = [
     "tensorflow>=2.16",
-    "opencv-python>=4.9",
+    "opencv-python>=4.9,<5",
     "numpy>=1.26",
     "pandas>=2.2",
     "scikit-learn>=1.4",

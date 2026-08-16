@@ -1,13 +1,14 @@
-"""Download an FER2013 image-folder dataset into data/raw/{train,test}.
+"""Download an FER2013 image-folder dataset into data/raw/{train,val,test}.
 
 Requires Kaggle API credentials configured (~/.kaggle/kaggle.json or
 KAGGLE_USERNAME/KAGGLE_KEY env vars). See
 https://github.com/Kaggle/kaggle-api#api-credentials
 
-Default source: astraszab/facial-expression-dataset-image-folders-fer2013
-(35,887 files, matches the original FER2013 train/PublicTest/PrivateTest
-split count). Auto-detects the actual train/test folder paths inside the
-downloaded cache so it's robust to whatever nesting the dataset uses.
+Default source: astraszab/facial-expression-dataset-image-folders-fer2013,
+which ships a proper train/val/test split with numeric class folders
+('0'..'6', the canonical FER2013 label encoding). Auto-detects the split
+parent inside the downloaded cache so it's robust to whatever nesting the
+dataset uses.
 """
 from __future__ import annotations
 
@@ -20,29 +21,45 @@ from facial_emotion.constants import EMOTION_LABELS
 
 DATASET_SLUG = "astraszab/facial-expression-dataset-image-folders-fer2013"
 DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
-EMOTION_SET = {e.lower() for e in EMOTION_LABELS}
+
+_NUMERIC_CLASSES = {str(i) for i in range(len(EMOTION_LABELS))}
+_NAMED_CLASSES = {e.lower() for e in EMOTION_LABELS}
 
 
-def find_split_folders(root: Path) -> list[tuple[Path, int]]:
-    hits = []
+def _is_class_dir(d: Path) -> bool:
+    children = {c.name.strip().lower() for c in d.iterdir() if c.is_dir()}
+    return _NUMERIC_CLASSES.issubset(children) or _NAMED_CLASSES.issubset(children)
+
+
+def find_split_parent(root: Path) -> Path | None:
+    """Find a directory that has 'train' and 'test' subfolders which each
+    contain the 7 FER class folders."""
     for p in root.rglob("*"):
         if not p.is_dir():
             continue
-        child_names = {c.name.lower() for c in p.iterdir() if c.is_dir()}
-        if EMOTION_SET.issubset(child_names):
-            n_images = sum(1 for c in p.rglob("*") if c.is_file())
-            hits.append((p, n_images))
-    return sorted(hits, key=lambda h: -h[1])
-
-
-def pick(hits: list[tuple[Path, int]], keyword_groups: list[list[str]], exclude: Path | None = None) -> Path | None:
-    for keywords in keyword_groups:
-        for p, _ in hits:
-            if exclude is not None and p == exclude:
-                continue
-            if any(k in p.name.lower() for k in keywords):
-                return p
+        subs = {c.name.lower(): c for c in p.iterdir() if c.is_dir()}
+        if "train" in subs and "test" in subs and _is_class_dir(subs["train"]) and _is_class_dir(subs["test"]):
+            return p
     return None
+
+
+def find_single_class_parent(root: Path) -> Path | None:
+    best, best_n = None, -1
+    for p in root.rglob("*"):
+        if p.is_dir() and _is_class_dir(p):
+            n = sum(1 for c in p.rglob("*") if c.is_file())
+            if n > best_n:
+                best, best_n = p, n
+    return best
+
+
+def _copy(src: Path, split_name: str) -> None:
+    dst = DATA_DIR / split_name
+    if dst.exists():
+        print(f"{dst} already exists, skipping copy")
+    else:
+        shutil.copytree(src, dst)
+        print(f"Copied {src} -> {dst}")
 
 
 def main() -> None:
@@ -50,44 +67,27 @@ def main() -> None:
     cache_path = Path(kagglehub.dataset_download(DATASET_SLUG))
     print(f"Downloaded to cache: {cache_path}")
 
-    hits = find_split_folders(cache_path)
-    if not hits:
-        raise SystemExit(
-            f"Could not find a folder with subfolders {sorted(EMOTION_SET)} under {cache_path}. "
-            "Inspect the download manually and update this script's detection logic."
-        )
-
-    train_src = pick(hits, [["train", "training"]]) or hits[0][0]
-    test_src = pick(
-        hits, [["privatetest"], ["publictest"], ["test", "testing", "val", "validation"]], exclude=train_src
-    )
-
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    dst = DATA_DIR / "train"
-    if dst.exists():
-        print(f"{dst} already exists, skipping copy")
-    else:
-        shutil.copytree(train_src, dst)
-        print(f"Copied {train_src} -> {dst}")
+    parent = find_split_parent(cache_path)
 
-    if test_src is None:
-        # No distinct test folder in this dataset — leave data/raw/test
-        # absent rather than duplicating train_src into it (which would
-        # leak training images into "test"). build_datasets() carves a
-        # proper held-out test split out of train/ itself in this case.
-        print(
-            "No distinct test folder found in this dataset — data/raw/test "
-            "will NOT be created. build_datasets() will carve train/val/test "
-            "out of data/raw/train instead."
+    if parent is not None:
+        subs = {c.name.lower(): c for c in parent.iterdir() if c.is_dir()}
+        _copy(subs["train"], "train")
+        _copy(subs["test"], "test")
+        if "val" in subs:
+            _copy(subs["val"], "val")
+        print(f"Done. Dataset ready at {DATA_DIR}")
+        return
+
+    pool = find_single_class_parent(cache_path)
+    if pool is None:
+        raise SystemExit(
+            f"Could not locate FER class folders (numeric 0..6 or {sorted(_NAMED_CLASSES)}) "
+            f"under {cache_path}. Inspect the download and update this script."
         )
-    else:
-        dst = DATA_DIR / "test"
-        if dst.exists():
-            print(f"{dst} already exists, skipping copy")
-        else:
-            shutil.copytree(test_src, dst)
-            print(f"Copied {test_src} -> {dst}")
-
+    print(f"No train/test split in dataset — copying single pool {pool} -> data/raw/train")
+    print("build_datasets() will carve a disjoint held-out test split out of it.")
+    _copy(pool, "train")
     print(f"Done. Dataset ready at {DATA_DIR}")
 
 

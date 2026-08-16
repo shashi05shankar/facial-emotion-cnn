@@ -20,8 +20,11 @@ def evaluate_model(model: tf.keras.Model, dataset: tf.data.Dataset, class_names:
         y_pred.extend(np.argmax(probs, axis=1).tolist())
         y_true.extend(labels.numpy().tolist())
 
-    report = classification_report(y_true, y_pred, target_names=class_names, output_dict=True)
-    cm = confusion_matrix(y_true, y_pred)
+    labels = list(range(len(class_names)))
+    report = classification_report(
+        y_true, y_pred, labels=labels, target_names=class_names, output_dict=True, zero_division=0
+    )
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
     accuracy = float(np.mean(np.array(y_true) == np.array(y_pred)))
 
     return {

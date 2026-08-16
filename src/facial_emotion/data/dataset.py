@@ -48,13 +48,17 @@ def build_datasets(
     img_size: int = IMG_SIZE,
     batch_size: int = 64,
     val_split: float = 0.1,
+    test_split: float = 0.1,
     use_clahe: bool = True,
     seed: int = 42,
 ):
     """Return (train_ds, val_ds, test_ds, class_names).
 
-    train/val come from `data_dir/train` via a shuffled split; test comes
-    from the dataset's own held-out `data_dir/test` folder.
+    If `data_dir/test` exists, train/val come from a shuffled split of
+    `data_dir/train` and test is that dataset-provided held-out folder. If
+    `data_dir/test` is absent (the source dataset only shipped one pooled
+    folder — see download_dataset.py), three disjoint slices are carved out
+    of `data_dir/train` instead, so test never overlaps train/val.
     """
     data_dir = Path(data_dir)
     train_dir = data_dir / "train"
@@ -67,15 +71,25 @@ def build_datasets(
             f"EMOTION_LABELS {EMOTION_LABELS} — check the download layout."
         )
 
-    x_all, y_all = load_split_as_arrays(train_dir, class_names, img_size, use_clahe)
-    x_test, y_test = load_split_as_arrays(test_dir, class_names, img_size, use_clahe)
-
     rng = np.random.default_rng(seed)
-    perm = rng.permutation(len(x_all))
-    x_all, y_all = x_all[perm], y_all[perm]
-    n_val = int(len(x_all) * val_split)
-    x_val, y_val = x_all[:n_val], y_all[:n_val]
-    x_train, y_train = x_all[n_val:], y_all[n_val:]
+
+    if test_dir.exists():
+        x_all, y_all = load_split_as_arrays(train_dir, class_names, img_size, use_clahe)
+        x_test, y_test = load_split_as_arrays(test_dir, class_names, img_size, use_clahe)
+        perm = rng.permutation(len(x_all))
+        x_all, y_all = x_all[perm], y_all[perm]
+        n_val = int(len(x_all) * val_split)
+        x_val, y_val = x_all[:n_val], y_all[:n_val]
+        x_train, y_train = x_all[n_val:], y_all[n_val:]
+    else:
+        x_pool, y_pool = load_split_as_arrays(train_dir, class_names, img_size, use_clahe)
+        perm = rng.permutation(len(x_pool))
+        x_pool, y_pool = x_pool[perm], y_pool[perm]
+        n_val = int(len(x_pool) * val_split)
+        n_test = int(len(x_pool) * test_split)
+        x_val, y_val = x_pool[:n_val], y_pool[:n_val]
+        x_test, y_test = x_pool[n_val : n_val + n_test], y_pool[n_val : n_val + n_test]
+        x_train, y_train = x_pool[n_val + n_test :], y_pool[n_val + n_test :]
 
     train_ds = (
         tf.data.Dataset.from_tensor_slices((x_train, y_train))

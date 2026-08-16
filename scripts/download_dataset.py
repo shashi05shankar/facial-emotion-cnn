@@ -61,18 +61,32 @@ def main() -> None:
     test_src = pick(
         hits, [["privatetest"], ["publictest"], ["test", "testing", "val", "validation"]], exclude=train_src
     )
-    if test_src is None:
-        remaining = [h for h in hits if h[0] != train_src]
-        test_src = remaining[0][0] if remaining else train_src
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    for split_name, src in (("train", train_src), ("test", test_src)):
-        dst = DATA_DIR / split_name
+    dst = DATA_DIR / "train"
+    if dst.exists():
+        print(f"{dst} already exists, skipping copy")
+    else:
+        shutil.copytree(train_src, dst)
+        print(f"Copied {train_src} -> {dst}")
+
+    if test_src is None:
+        # No distinct test folder in this dataset — leave data/raw/test
+        # absent rather than duplicating train_src into it (which would
+        # leak training images into "test"). build_datasets() carves a
+        # proper held-out test split out of train/ itself in this case.
+        print(
+            "No distinct test folder found in this dataset — data/raw/test "
+            "will NOT be created. build_datasets() will carve train/val/test "
+            "out of data/raw/train instead."
+        )
+    else:
+        dst = DATA_DIR / "test"
         if dst.exists():
             print(f"{dst} already exists, skipping copy")
-            continue
-        shutil.copytree(src, dst)
-        print(f"Copied {src} -> {dst}")
+        else:
+            shutil.copytree(test_src, dst)
+            print(f"Copied {test_src} -> {dst}")
 
     print(f"Done. Dataset ready at {DATA_DIR}")
 
